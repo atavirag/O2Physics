@@ -173,7 +173,7 @@ struct HfTreeCreatorD0ToKPi {
 
   template <typename T, typename U, typename V>
   auto fillTable(const T& candidate, const U& prong0, const V& prong1, int CandFlag, int FunctionSelection, double FunctionInvMass, double FunctionCosThetaStar,
-                 double FunctionCt, double FunctionY, double FunctionE, int8_t FlagMc, int8_t Origin) 
+                 double FunctionCt, double FunctionY, double FunctionE, int8_t FlagMc, int8_t Origin)
   {
     if (FunctionSelection >= 1) {
       rowCandidateFull(
@@ -234,7 +234,6 @@ struct HfTreeCreatorD0ToKPi {
         Origin);
     }
   }
-
 
   void processData(aod::Collisions const& collisions,
                    soa::Join<aod::HfCand2Prong, aod::HfSelD0> const& candidates,
