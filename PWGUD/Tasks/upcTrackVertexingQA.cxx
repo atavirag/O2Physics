@@ -14,10 +14,13 @@
 /// \author Andrea Tavira Garcia a.tavira@cern.ch
 /// \author Andrea Giovanni Riffero andrea.giovanni.riffero@cern.ch
 
+#include "Common/CCDB/EventSelectionParams.h"
 #include "Common/DataModel/PIDResponseTPC.h"
 #include "Common/DataModel/TrackSelectionTables.h"
 
 #include <CommonConstants/PhysicsConstants.h>
+#include <CCDB/BasicCCDBManager.h>
+#include <DataFormatsParameters/AggregatedRunInfo.h>
 #include <Framework/AnalysisDataModel.h>
 #include <Framework/AnalysisTask.h>
 #include <Framework/Configurable.h>
@@ -53,6 +56,19 @@ struct UpcTrackVertexingQA {
   Configurable<float> ptTrackMin{"ptTrackMin", 0.1, "min. track pT (GeV/c)"};
   Configurable<float> etaTrackMax{"etaTrackMax", 0.9, "max. |eta| of tracks"};
   Configurable<int> nMinTpcClusters{"nMinTpcClusters", 60, "min. number of TPC clusters"};
+
+  // services
+  Service<o2::ccdb::BasicCCDBManager> ccdb; // access to database
+
+  // variables to store run info
+  int runNumberBc = 0;     // run number used to process BCs
+  int runNumberCol = 0;    // run number used to process collisions
+  int64_t sor = 0;         // best known timestamp for the start of run
+  int64_t orbitsPerTF = 0; // number of orbits per TF
+  int64_t bcSOR = 0;       // first bc of the first orbit
+  int64_t nBCsPerTF = 0;   // duration of TF in bcs
+  int64_t currentTF = -1;  // current time frame being looked at
+  int64_t nTF = 0;         // number of time frames in run
 
   // Name shortenings
   // passed* columns are in TrackSelectionExtension; isGlobalTrack* and trackCutFlag in TrackSelection
@@ -95,8 +111,9 @@ struct UpcTrackVertexingQA {
   {
     // collision level
     registry.add("Coll/hNContrib", ";N_{PV contributors};entries", {HistType::kTH1F, {{10, -0.5, 9.5}}});
-    registry.add("Coll/hBCid", ";BCid;entries", {HistType::kTH1F, {{1000, 0., 1000.}}});
+    registry.add("Coll/hBCid", ";BCid;entries", {HistType::kTH1F, {{1000, 0., 100000.}}});
     registry.add("Coll/hVtxZ", ";#it{z}_{vtx} (cm);entries", hVtxZ);
+    registry.add("Coll/hnTF", ";TF;entries", {HistType::kTH1F, {{2000, 0., 2000}}});
     registry.add("Coll/hVtxX", ";#it{x}_{vtx} (cm);entries", hVtxX);
     registry.add("Coll/hVtxY", ";#it{y}_{vtx} (cm);entries", hVtxY);
     registry.add("Coll/hVtxChi2", ";#chi^{2} vtx;entries", {HistType::kTH1F, {{100, 0., 10.}}});
@@ -210,6 +227,32 @@ struct UpcTrackVertexingQA {
     } else {
       return track.tpcNSigmaMu();
     }
+  }
+
+  void getRunInfo(int run)
+  {
+    auto runInfo = o2::parameters::AggregatedRunInfo::buildAggregatedRunInfo(ccdb->instance(), run);
+    sor = runInfo.sor; // in ms
+    auto orbitSOR = runInfo.orbitSOR;
+    auto orbitEOR = runInfo.orbitEOR;
+    orbitsPerTF = runInfo.orbitsPerTF;
+    bcSOR = orbitSOR * o2::constants::lhc::LHCMaxBunches;        // first bc of the first orbit
+    nBCsPerTF = orbitsPerTF * o2::constants::lhc::LHCMaxBunches; // duration of TF in bcs
+    nTF = std::ceil((orbitEOR - orbitSOR) / orbitsPerTF);
+  } // end getRunInfo()
+
+  //--------------------------------------------------------------------------------
+  // compute  Bc within the orbit
+  int64_t getBcWithinOrbit(int64_t globalBC)
+  {
+    return (globalBC % o2::constants::lhc::LHCMaxBunches);
+  }
+
+  //--------------------------------------------------------------------------------
+  // compute TF for this BC
+  int64_t getTimeFrame(int64_t globalBC)
+  {
+    return (globalBC - bcSOR) / nBCsPerTF;
   }
 
   // Result of every cut for one track (same order as CutLabels)
@@ -434,8 +477,8 @@ struct UpcTrackVertexingQA {
   void checkMcGen(aod::McCollision const& mcCollision, aod::McParticles const& mcParticles)
   {
     using o2::constants::physics::Pdg;
-    constexpr int DaughterPdg = (species == CandSpecies::kRho) ? static_cast<int>(PDG_t::kPiPlus)
-                                                               : static_cast<int>(PDG_t::kMuonMinus);
+    //constexpr int DaughterPdg = (species == CandSpecies::kRho) ? static_cast<int>(PDG_t::kPiPlus)
+    //                                                           : static_cast<int>(PDG_t::kMuonMinus);
     constexpr int MotherPdg = (species == CandSpecies::kRho) ? static_cast<int>(PDG_t::kRho770_0)
                                                              : static_cast<int>(o2::constants::physics::Pdg::kJPsi);
 
@@ -444,9 +487,9 @@ struct UpcTrackVertexingQA {
     registry.fill(HIST("McGen/Coll/hVtxZ"), mcCollision.posZ());
 
     for (auto const& mcPart : mcParticles) {
-      if (std::abs(mcPart.pdgCode()) != DaughterPdg) {
-        continue;
-      }
+      //if (std::abs(mcPart.pdgCode()) != DaughterPdg) {
+        //continue;
+      //}
       if (mcPart.pt() < ptTrackMin || std::abs(mcPart.eta()) > etaTrackMax) {
         continue;
       }
@@ -535,7 +578,7 @@ struct UpcTrackVertexingQA {
 
 
 
-  void processTracksIU(TracksExtraIU const& tracks) {
+  void processTracksIU(TracksExtraIU const& tracks, aod::Collisions const&, aod::BCs const&) {
     // track loop
     for (const auto& track : tracks) {
 
@@ -553,6 +596,18 @@ struct UpcTrackVertexingQA {
       } else {
         registry.fill(HIST("Coll/hCollIdCounter"), 0);
       }
+
+      if (collId < 0) {
+        continue;
+      }
+
+      auto collision = track.collision();
+      auto bc = collision.bc();
+      
+      getRunInfo(bc.runNumber());
+      //LOGF(info, "TF %ld", getTimeFrame(bc.globalBC()));
+
+      registry.fill(HIST("Coll/hnTF"), getTimeFrame(bc.globalBC()));
     }
   }
 
