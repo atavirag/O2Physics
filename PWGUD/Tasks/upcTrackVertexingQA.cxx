@@ -57,6 +57,7 @@ struct UpcTrackVertexingQA {
   Configurable<float> ptTrackMin{"ptTrackMin", 0.1, "min. track pT (GeV/c)"};
   Configurable<float> etaTrackMax{"etaTrackMax", 0.9, "max. |eta| of tracks"};
   Configurable<int> nMinTpcClusters{"nMinTpcClusters", 60, "min. number of TPC clusters"};
+  Configurable<bool> selectAfterburnerTracks{"selectAfterburnerTracks", true, "select ITS afterburner tracks, false to select tracks with ITS inner barrel clusters"};
 
   // Axes (the mass axis matches the default rho window; override it for the J/psi)
   ConfigurableAxis axisMass{"axisMass", {200, 0.5, 1.3}, "m_{#pi#pi} (GeV/#it{c}^{2})"};
@@ -92,7 +93,7 @@ struct UpcTrackVertexingQA {
   static constexpr float MassMuon = o2::constants::physics::MassMuon;
 
   // folders that contains plots for all tracks and associated tracks
-  static constexpr std::array<const char*, 3> TrackFolders = {"Trk/", "TrkColl/", "TrkAmb/"};
+  static constexpr std::array<const char*, 6> TrackFolders = {"Trk/", "TrkColl/", "TrkAmb/", "Trk_TPC_tracks/", "Trk_kine_sel/", "Trk_afterburner/"};
 
   // Name shortenings
   // passed* columns are in TrackSelectionExtension; isGlobalTrack* and trackCutFlag in TrackSelection
@@ -106,8 +107,42 @@ struct UpcTrackVertexingQA {
   using TracksExtraIU = soa::Join<aod::TracksIU, aod::TracksExtra, aod::TracksDCA,
                                   aod::TrackSelection, aod::TrackSelectionExtension>;
 
+  // Ordered list of cuts. The cumulative cut flow follows this order,
+  // so reorder CutLabels and getCutResults together to change what "tighter" means.
+  static constexpr int NCuts = 7;
+  static constexpr std::array<const char*, NCuts> CutLabels = {
+    "All tracks", "has_TPC", "min TPC clusters","#it{p}_{T} cut", "#eta cut", "has_ITS", "is ITS afterburner"};
+
+  static constexpr std::array<const char*, NCuts> CutLabelsNoInner = {
+    "All tracks", "has_TPC", "min TPC clusters","#it{p}_{T} cut", "#eta cut", "has_ITS", "no ITS inner"};
+  
+  static constexpr int NCutsGen = 3;
+  static constexpr std::array<const char*, NCutsGen> CutLabelsGen = {
+    "All primary tracks","#it{p}_{T} cut", "#eta cut"};
+
   void init(InitContext&)
   {
+    // counter of events lost after every selection
+    registry.add("hEventSelectionCounter", "tracks surviving cuts applied in sequence;;entries", HistType::kTH1F, {{NCuts, -0.5, NCuts - 0.5}});
+    auto hist = registry.get<TH1>(HIST("hEventSelectionCounter"));
+    for (int i = 0; i < hist->GetNbinsX(); ++i) {
+      if (selectAfterburnerTracks) {
+        hist->GetXaxis()->SetBinLabel(i + 1, CutLabels[i]);
+      } else {
+        hist->GetXaxis()->SetBinLabel(i + 1, CutLabelsNoInner[i]);
+        }
+    }
+
+    registry.add("hEventSelectionCounterGen", "tracks surviving cuts applied in sequence;;entries", HistType::kTH1F, {{NCutsGen, -0.5, NCutsGen - 0.5}});
+    hist = registry.get<TH1>(HIST("hEventSelectionCounterGen"));
+    for (int i = 0; i < hist->GetNbinsX(); ++i) {
+      hist->GetXaxis()->SetBinLabel(i + 1, CutLabelsGen[i]);
+    }
+
+    //registry.get<TH1>(HIST("hEventSelectionCounter"))->GetXaxis()->SetBinLabel(3, Form("> %d TPC clusters", nMinTpcClusters));
+    //registry.get<TH1>(HIST("hEventSelectionCounter"))->GetXaxis()->SetBinLabel(4, Form("#it{p}_{T} > %.2f", ptTrackMin));
+    //registry.get<TH1>(HIST("hEventSelectionCounter"))->GetXaxis()->SetBinLabel(5, Form("|#eta| < %.2f",etaTrackMax));
+
     // collision level
     registry.add("Coll/hNContrib", ";N_{PV contributors};entries", {HistType::kTH1F, {{10, -0.5, 9.5}}});
     registry.add("Coll/hBCid", ";BCid;entries", {HistType::kTH1F, {{1000, 0., 100000.}}});
@@ -125,16 +160,30 @@ struct UpcTrackVertexingQA {
     registry.add("Trk/hNSigmaVsP", ";#it{p} (GeV/#it{c});n#sigma^{TPC}", {HistType::kTH2F, {{200, 0., 2.}, {100, -10., 10.}}});
     registry.add("Trk/hHasIts", ";has ITS;entries", {HistType::kTH1F, {{2, -0.5, 1.5}}});
     registry.add("Trk/hIsPvContrib", ";is PV contributor;entries", {HistType::kTH1F, {{2, -0.5, 1.5}}});
-    registry.add("Trk/hTpcNClsFound", ";N_{cls} TPC;entries", {HistType::kTH1F, {{90, 60, 150.}}});
     registry.add("Trk/hItsChi2NCl", ";#chi^{2}/N_{cls} ITS;entries", {HistType::kTH1F, {{100, 0., 10.}}});
     registry.add("Trk/hItsNCls", ";N_{cls} ITS;entries", {HistType::kTH1F, {{8, -0.5, 7.5}}});
     registry.add("Trk/hItsNClsInnerBarrel", ";N_{cls} ITS Inner Barrel;entries", {HistType::kTH1F, {{4, -0.5, 3.5}}});
     registry.add("Trk/hDcaXY", ";DCA_{xy} (cm);entries", {HistType::kTH1F, {{140, -0.035, 0.035}}});
     registry.add("Trk/hDcaZ", ";DCA_{z} (cm);entries", {HistType::kTH1F, {{200, -0.05, 0.05}}});
 
+    const double nClsMin = static_cast<double>(nMinTpcClusters);
+    const double nClsMax = 150.;
+    const int nClsBins = static_cast<int>(nClsMax - nClsMin);
+
+    registry.add("Trk/hTpcNClsFound", ";N_{cls} TPC;entries", {HistType::kTH1F, {{nClsBins, nClsMin, nClsMax}}});
+
     // track level (prongs of the candidate, after collision matching)
     registry.addClone("Trk/", "TrkColl/");
     registry.add("TrkColl/hTrackSizePerEvent", ";#it{N}_{tracks} per event;entries", {HistType::kTH1F, {{10, -0.5, 9.5}}});
+
+    // track level plot for all TPC tracks
+    registry.addClone("Trk/", "Trk_TPC_tracks/");
+
+    // track level plot for all TPC tracks after selection
+    registry.addClone("Trk/", "Trk_kine_sel/");
+
+    // track level plots for afterburner tracks
+    registry.addClone("Trk/", "Trk_afterburner/");
 
     // track level plots for ambiguous tracks
     registry.addClone("Trk/", "TrkAmb/");
@@ -210,20 +259,61 @@ struct UpcTrackVertexingQA {
   //--------------------------------------------------------------------------------
   // Basic single-track selection
   template <typename TTrack>
-  bool isGoodTrack(TTrack const& track)
+  bool isGoodTrack(TTrack const& track, bool countEv = false, int earlyStop = CutLabels.size())
   {
+    // all tracks
+    if (countEv) registry.get<TH1>(HIST("hEventSelectionCounter"))->Fill(CutLabels[0], 1.);
+    if (earlyStop == 0) return true;
+
+    // TPC tracks
     if (!track.hasTPC()) {
       return false;
     }
+    if (countEv) registry.get<TH1>(HIST("hEventSelectionCounter"))->Fill(CutLabels[1], 1.);
+    if (earlyStop == 1) return true;
+
+    // min TPC clusters
     if (track.tpcNClsFound() < nMinTpcClusters) {
       return false;
     }
-    if (track.pt() < ptTrackMin || std::abs(track.eta()) > etaTrackMax) {
+    if (countEv) registry.get<TH1>(HIST("hEventSelectionCounter"))->Fill(CutLabels[2], 1.);
+    if (earlyStop == 2) return true;
+
+    // pT > pT_min
+    if (track.pt() < ptTrackMin) {
       return false;
     }
-    if (std::abs(track.dcaZ()) >= UnassignedDCA || std::abs(track.dcaXY()) >= UnassignedDCA) {
+    if (countEv) registry.get<TH1>(HIST("hEventSelectionCounter"))->Fill(CutLabels[3], 1.);
+    if (earlyStop == 3) return true;
+
+    // eta < eta_max
+    if (std::abs(track.eta()) > etaTrackMax) {
       return false;
     }
+    if (countEv) registry.get<TH1>(HIST("hEventSelectionCounter"))->Fill(CutLabels[4], 1.);
+    if (earlyStop == 4) return true;
+
+    // tracks has ITS info
+    if (!track.hasITS()) {
+      return false;
+    }
+    if (countEv) registry.get<TH1>(HIST("hEventSelectionCounter"))->Fill(CutLabels[5], 1.);
+    if (earlyStop == 5) return true;
+
+    if (selectAfterburnerTracks) {
+      // track is assigned as ITS afterburner
+      if (!track.isITSAfterburner()) {
+        return false;
+      }
+      if (countEv) registry.get<TH1>(HIST("hEventSelectionCounter"))->Fill(CutLabels[6], 1.);
+    } else {
+      // track does not have clusters in the ITS inner barrel
+      if (track.itsNClsInnerBarrel() > 0) {
+        return false;
+      }
+      if (countEv) registry.get<TH1>(HIST("hEventSelectionCounter"))->Fill(CutLabelsNoInner[6], 1.);
+    }
+
     return true;
   }
 
@@ -242,11 +332,11 @@ struct UpcTrackVertexingQA {
   //--------------------------------------------------------------------------------
   // fills the histograms with info on track properties
   // works for both all and associated tracks, and if MC is available or not
-  template <CandSpecies species, int folder, bool isMc, typename TTrack>
+  template <CandSpecies species, int folder, bool isMc, int earlyStop, typename TTrack>
   void fillTrackHistograms(TTrack const& track)
   {
     // fill the histos only for good tracks
-    if (!isGoodTrack(track)) {
+    if (!isGoodTrack(track, folder==0, earlyStop)) {
       return;
     }
 
@@ -288,9 +378,17 @@ struct UpcTrackVertexingQA {
   {
     for (auto const& track : tracks) {
       int32_t collId = track.collisionId();
-      fillTrackHistograms<species, 0, isMc>(track);
+      // selected tracks
+      fillTrackHistograms<species, 0, isMc, NCuts>(track);
+      // all TPC tracks
+      fillTrackHistograms<species, 3, false, 1>(track);
+      // all TPC tracks after kinematic cuts
+      fillTrackHistograms<species, 4, false, 4>(track);
+      // afterburner tracks
+      fillTrackHistograms<species, 5, false, 6>(track);
+
       if (collId < 0) {
-        fillTrackHistograms<species, 2, false>(track); // isMc always false here since it fills Matched/.. histos
+        fillTrackHistograms<species, 2, false, NCuts>(track); // isMc always false here since it fills Matched/.. histos
       }
     }
   }
@@ -322,7 +420,7 @@ struct UpcTrackVertexingQA {
       if (isGoodTrack(track)) {
         goodTracks.push_back(track);
         // use TrkColl directory
-        fillTrackHistograms<species, 1, isMc>(track);
+        fillTrackHistograms<species, 1, isMc, NCuts>(track);
       }
     }
 
@@ -375,9 +473,24 @@ struct UpcTrackVertexingQA {
     std::vector<aod::McParticle> goodMcGenParticles;
     for (auto const& mcPart : mcParticles) {
 
-      if (!mcPart.isPhysicalPrimary() || mcPart.pt() < ptTrackMin || std::abs(mcPart.eta()) > etaTrackMax) {
+      // all primary particles
+      if(!mcPart.isPhysicalPrimary()) {
         continue;
       }
+      registry.get<TH1>(HIST("hEventSelectionCounterGen"))->Fill(CutLabelsGen[0], 1.);
+
+      // pt cut
+      if (mcPart.pt() < ptTrackMin) {
+        continue;
+      }
+      registry.get<TH1>(HIST("hEventSelectionCounterGen"))->Fill(CutLabelsGen[1], 1.);
+
+      // eta cut
+      if (std::abs(mcPart.eta()) > etaTrackMax) {
+        continue;
+      }
+      registry.get<TH1>(HIST("hEventSelectionCounterGen"))->Fill(CutLabelsGen[2], 1.);
+
       registry.fill(HIST("McGen/Part/hPt"), mcPart.pt());
       registry.fill(HIST("McGen/Part/hEta"), mcPart.eta());
 
